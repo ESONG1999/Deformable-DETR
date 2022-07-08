@@ -17,6 +17,7 @@ from pathlib import Path
 import torch
 import torch.utils.data
 from pycocotools import mask as coco_mask
+import json
 
 from .torchvision_datasets import CocoDetection as TvCocoDetection
 from util.misc import get_local_rank, get_local_size
@@ -24,11 +25,13 @@ import datasets.transforms as T
 
 
 class CocoDetection(TvCocoDetection):
-    def __init__(self, img_folder, ann_file, transforms, return_masks, cache_mode=False, local_rank=0, local_size=1):
+    def __init__(self, img_folder, ann_file, transforms, return_masks, cache_mode=False, local_rank=0, local_size=1, bev_data = None):
         super(CocoDetection, self).__init__(img_folder, ann_file,
                                             cache_mode=cache_mode, local_rank=local_rank, local_size=local_size)
         self._transforms = transforms
         self.prepare = ConvertCocoPolysToMask(return_masks)
+        if bev_data is not None:
+            self.bev_data = json.load(open(bev_data))
 
     def __getitem__(self, idx):
         img, target = super(CocoDetection, self).__getitem__(idx)
@@ -37,6 +40,8 @@ class CocoDetection(TvCocoDetection):
         img, target = self.prepare(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
+            target['bev'] = torch.tensor(self.bev_data[str(image_id)])
+        assert target['bev'].size()[0] == target['boxes'].size()[0] 
         return img, target
 
 
@@ -73,6 +78,12 @@ class ConvertCocoPolysToMask(object):
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
+        # boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        try:
+            boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1,4)
+        except:
+            print(image_id)
+            print(boxes)
         boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
         boxes[:, 0::2].clamp_(min=0, max=w)
@@ -133,15 +144,15 @@ def make_coco_transforms(image_set):
 
     if image_set == 'train':
         return T.Compose([
-            T.RandomHorizontalFlip(),
-            T.RandomSelect(
-                T.RandomResize(scales, max_size=1333),
-                T.Compose([
-                    T.RandomResize([400, 500, 600]),
-                    T.RandomSizeCrop(384, 600),
-                    T.RandomResize(scales, max_size=1333),
-                ])
-            ),
+            # T.RandomHorizontalFlip(),
+            # T.RandomSelect(
+            T.RandomResize(scales, max_size=1333),
+            #     T.Compose([
+            #         T.RandomResize([400, 500, 600]),
+            #         T.RandomSizeCrop(384, 600),
+            #         T.RandomResize(scales, max_size=1333),
+            #     ])
+            # ),
             normalize,
         ])
 
@@ -166,4 +177,15 @@ def build(image_set, args):
     img_folder, ann_file = PATHS[image_set]
     dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks,
                             cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
+    return dataset
+
+def build_kitti_coco(image_set, args):
+    anno_root = Path("/srip-vol/datasets/KITTI3D/coco")
+    PATHS = {
+        "train": (Path("/srip-vol/datasets/KITTI3D/training/image_2"), anno_root / f'kitti_{image_set}.json'),
+        "val": (Path("/srip-vol/datasets/KITTI3D/training/image_2"), anno_root / f'kitti_{image_set}.json'),
+    }
+    BEV_DATA = "/srip-vol/datasets/KITTI3D/coco/bev_%s.json"%(image_set)
+    img_folder, ann_file = PATHS[image_set]
+    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks, bev_data = BEV_DATA)
     return dataset

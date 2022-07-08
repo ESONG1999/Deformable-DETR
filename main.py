@@ -25,12 +25,16 @@ from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 
+import PIL.Image as Image
+from torchvision import transforms
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Deformable DETR Detector', add_help=False)
     parser.add_argument('--lr', default=2e-4, type=float)
     parser.add_argument('--lr_backbone_names', default=["backbone.0"], type=str, nargs='+')
-    parser.add_argument('--lr_backbone', default=2e-5, type=float)
+    # parser.add_argument('--lr_backbone', default=2e-5, type=float)
+    # freeze the backbone
+    parser.add_argument('--lr_backbone', default=0, type=float)
     parser.add_argument('--lr_linear_proj_names', default=['reference_points', 'sampling_offsets'], type=str, nargs='+')
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
@@ -47,7 +51,7 @@ def get_args_parser():
     # Variants of Deformable DETR
     parser.add_argument('--with_box_refine', default=False, action='store_true')
     parser.add_argument('--two_stage', default=False, action='store_true')
-
+    parser.add_argument('--num_classes', default=3, type=int, help = "max class id. Refer comment at end of detr.py")
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
@@ -102,25 +106,34 @@ def get_args_parser():
     parser.add_argument('--dice_loss_coef', default=1, type=float)
     parser.add_argument('--cls_loss_coef', default=2, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
+    parser.add_argument('--bev_loss_coef', default=2, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
 
     # dataset parameters
-    parser.add_argument('--dataset_file', default='coco')
-    parser.add_argument('--coco_path', default='./data/coco', type=str)
+    # parser.add_argument('--dataset_file', default='coco')
+    parser.add_argument('--dataset_file', default='kitti_coco')
+
+    # parser.add_argument('--coco_path', default='./data/coco', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
+    parser.add_argument('--kitti_path', default='/srip-vol/datasets/KITTI3D/', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
-    parser.add_argument('--output_dir', default='',
+    # parser.add_argument('--output_dir', default='',
+    #                     help='path where to save, empty for no saving')
+    parser.add_argument('--output_dir', default='output_logs_local',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--resume', default='', help='resume from checkpoint')
+    # parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--resume', default='pretrained/detr-r101-dc5-a2e86def.pth', help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--test', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
+    parser.add_argument('--test_image', default = None, type = str, help = 'Path to image for testing')
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
 
     return parser
@@ -134,6 +147,7 @@ def main(args):
         assert args.masks, "Frozen training is meant for segmentation only"
     print(args)
 
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -231,6 +245,17 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
+        del checkpoint["model"]["class_embed.weight"]
+        del checkpoint["model"]["class_embed.bias"]
+        # Remove box weights
+        keys_to_delete = []
+        for key in checkpoint["model"]:
+            if 'box_embed' in key:
+                print(key)
+                keys_to_delete.append(key)
+
+        for key in keys_to_delete:
+            del checkpoint["model"][key]
         missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
         if len(missing_keys) > 0:
